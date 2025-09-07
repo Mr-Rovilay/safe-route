@@ -5,12 +5,14 @@ import connectDB from "./db/db.js";
 import http from "http";
 import { Server } from "socket.io";
 import cookieParser from "cookie-parser";
-import multer from "multer"; // Add this import
-import cron from "node-cron"; // Add this import
-import { initSockets } from './controllers/socketController.js';
+import multer from "multer";
+import cron from "node-cron";
 import axios from "axios";
 import authRoutes from './routes/authRoutes.js';
 import rideRoutes from './routes/rideRoutes.js';
+import tripRoutes from './routes/tripRoutes.js';
+import trafficRoutes from './routes/trafficRoutes.js';
+import { initSockets } from './controllers/socketController.js';
 
 dotenv.config();
 
@@ -39,11 +41,13 @@ app.use(
 );
 app.use(cookieParser());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.json({ limit: "10mb" })); // Reduced from 50mb for security
+app.use(express.json({ limit: "10mb" }));
 
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/rides', rideRoutes);
+app.use('/api/trips', tripRoutes);
+app.use('/api/traffic', trafficRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -110,6 +114,20 @@ cron.schedule('*/30 * * * *', async () => {
     }
   } catch (error) {
     console.error('Error in scheduled weather check:', error);
+  }
+});
+
+// Schedule traffic data update every 15 minutes
+cron.schedule('*/15 * * * *', async () => {
+  try {
+    console.log('Starting scheduled traffic data update...');
+    
+    // Call the fetchExternalTrafficData endpoint internally
+    const response = await axios.post(`${process.env.BASE_URL || 'http://localhost:5000'}/api/traffic/fetch-external`);
+    
+    console.log(`Traffic data updated successfully: ${response.data.updatedCount} segments`);
+  } catch (error) {
+    console.error('Error in scheduled traffic data update:', error);
   }
 });
 

@@ -1,5 +1,5 @@
 import express from 'express';
-import { register, login, getMe, updateProfile, updateLocation, uploadProfilePicture } from '../controllers/userController.js';
+import { register, login, getMe, updateProfile, updateLocation, uploadProfilePicture, setCurrentRide, clearCurrentRide } from '../controllers/userController.js';
 import { protect } from '../middleware/auth.js';
 import { uploadSingleImage } from '../middleware/upload.js';
 
@@ -20,5 +20,7 @@ router.get('/me', protect, getMe);
 router.put('/profile', protect, updateProfile);
 router.put('/location', protect, updateLocation);
 router.post('/upload-profile-picture', protect, uploadSingleImage, uploadProfilePicture);
+router.put('/current-ride', protect, setCurrentRide);
+router.delete('/current-ride', protect, clearCurrentRide);
 
 export default router;

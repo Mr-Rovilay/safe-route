@@ -1,4 +1,5 @@
 import Ride from "../models/RideSchema.js";
+import User from "../models/UserSchema.js";
 
 // Create a new ride
 export const createRide = async (req, res) => {

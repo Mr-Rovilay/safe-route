@@ -3,6 +3,7 @@ import User from '../models/UserSchema.js';
 import dotenv from 'dotenv';
 import { generateToken } from '../utils/generateToken.js';
 import { uploadToCloudinary } from '../middleware/upload.js';
+import mongoose from 'mongoose';
 
 dotenv.config();
 
