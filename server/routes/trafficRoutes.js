@@ -1,31 +1,30 @@
 import express from 'express';
-import { 
+import {
+  fetchExternalTrafficData,
   getAllTrafficData,
   getTrafficBySegmentId,
   getTrafficByLGA,
   createTrafficData,
   updateTrafficData,
   getRouteTraffic,
-  fetchExternalTrafficData,
   getTrafficIncidents,
-  getFloodedRoads
+  getFloodedRoads,
 } from '../controllers/trafficController.js';
+import { protect } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Public routes for traffic data
-router.get('/', getAllTrafficData);
-router.get('/segment/:segmentId', getTrafficBySegmentId);
-router.get('/lga/:lga', getTrafficByLGA);
-router.get('/incidents', getTrafficIncidents);
-router.get('/flooded', getFloodedRoads);
+// Public routes
+router.get('/', getAllTrafficData); // Get all traffic data with filters
+router.get('/segment/:segmentId', getTrafficBySegmentId); // Get traffic by segment ID
+router.get('/lga/:lga', getTrafficByLGA); // Get traffic by LGA
+router.get('/incidents', getTrafficIncidents); // Get traffic incidents
+router.get('/flooded', getFloodedRoads); // Get flooded roads
 
-// Route planning (requires segment IDs in request body)
-router.post('/route', getRouteTraffic);
-
-// Admin routes for traffic data management
-router.post('/', createTrafficData);
-router.put('/segment/:segmentId', updateTrafficData);
-router.post('/fetch-external', fetchExternalTrafficData);
+// Protected routes (require authentication)
+router.post('/fetch-external', protect, fetchExternalTrafficData); // Fetch and update external data
+router.post('/', protect, createTrafficData); // Create new traffic data
+router.patch('/segment/:segmentId', protect, updateTrafficData); // Update traffic data
+router.post('/route', protect, getRouteTraffic); // Get traffic for route planning
 
 export default router;

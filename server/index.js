@@ -51,7 +51,7 @@ app.use('/api/traffic', trafficRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  // Handle multer errors
+  console.error('Error:', err.message, err.stack); // Log errors for debugging
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
       return res.status(400).json({ message: 'File size too large. Maximum size is 5MB.' });
@@ -61,9 +61,7 @@ app.use((err, req, res, next) => {
   } else if (err.message === 'Only image files are allowed!') {
     return res.status(400).json({ message: err.message });
   }
-  
-  // Handle other errors
-  res.status(500).json({ message: 'Something went wrong!' });
+  res.status(500).json({ message: 'Something went wrong!', error: err.message });
 });
 
 app.get("/", (req, res) => {
@@ -85,8 +83,7 @@ cron.schedule('*/30 * * * *', async () => {
       `https://api.openweathermap.org/data/2.5/forecast?lat=6.5244&lon=3.3792&appid=${process.env.OPENWEATHER_API_KEY}&units=metric`
     );
     
-    // Get next few forecasts to check for rain
-    const forecasts = response.data.list.slice(0, 4); // Next 12 hours
+    const forecasts = response.data.list.slice(0, 4);
     let maxRain = 0;
     let rainTimes = [];
     
@@ -98,22 +95,20 @@ cron.schedule('*/30 * * * *', async () => {
       }
     });
     
-    // If significant rain is expected, emit alert
     if (maxRain > 3) {
       const alert = {
         message: `Rain expected in Lagos (${maxRain.toFixed(1)}mm) at: ${rainTimes.join(', ')}`,
         severity: maxRain > 10 ? 'high' : 'medium',
         maxRain,
         rainTimes,
-        timestamp: new Date()
+        timestamp: new Date(),
       };
       
-      // Emit to all connected clients
       io.emit('weather-alert', alert);
       console.log('Weather alert emitted:', alert.message);
     }
   } catch (error) {
-    console.error('Error in scheduled weather check:', error);
+    console.error('Error in scheduled weather check:', error.message);
   }
 });
 
@@ -121,13 +116,12 @@ cron.schedule('*/30 * * * *', async () => {
 cron.schedule('*/15 * * * *', async () => {
   try {
     console.log('Starting scheduled traffic data update...');
-    
-    // Call the fetchExternalTrafficData endpoint internally
-    const response = await axios.post(`${process.env.BASE_URL || 'http://localhost:5000'}/api/traffic/fetch-external`);
-    
+    const response = await axios.post(`http://localhost:${PORT}/api/traffic/fetch-external`, {}, {
+      headers: { Authorization: `Bearer ${process.env.ADMIN_TOKEN}` }, // Use admin token
+    });
     console.log(`Traffic data updated successfully: ${response.data.updatedCount} segments`);
   } catch (error) {
-    console.error('Error in scheduled traffic data update:', error);
+    console.error('Error in scheduled traffic data update:', error.message);
   }
 });
 
@@ -145,6 +139,6 @@ connectDB()
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err) => {
-  console.error('Unhandled Rejection:', err);
+  console.error('Unhandled Rejection:', err.message, err.stack);
   server.close(() => process.exit(1));
 });
