@@ -87,7 +87,8 @@ const trafficSchema = new mongoose.Schema({
 // Indexing for performance
 trafficSchema.index({ segmentId: 1, recordedAt: -1 });
 trafficSchema.index({ lga: 1 });
-trafficSchema.index({ coordinates: "2dsphere" });
+// trafficSchema.index({ coordinates: "2dsphere" });
+trafficSchema.index({ location: "2dsphere" });
 
 const Traffic = mongoose.model("Traffic", trafficSchema);
 export default Traffic;

@@ -27,6 +27,7 @@ const floodSchema = new mongoose.Schema({
 
 // Index for fast queries by LGA + time
 floodSchema.index({ lga: 1, recordedAt: -1 });
+floodSchema.index({ coordinates: "2dsphere" });
 
 const Flood = mongoose.model("Flood", floodSchema);
 export default Flood;
