@@ -1,19 +1,98 @@
-import Traffic from '../models/TrafficSchema.js'; // Corrected import name
-import axios from 'axios';
-import { z } from 'zod'; // For input validation
+import Traffic from "../models/TrafficSchema.js"; // Corrected import
+import axios from "axios";
+import { z } from "zod";
+import Weather from "../models/WeatherSchema.js";
 
 // Input validation schemas
 const querySchema = z.object({
-  page: z.string().optional().transform((val) => parseInt(val) || 1),
-  limit: z.string().optional().transform((val) => parseInt(val) || 20),
+  page: z
+    .string()
+    .optional()
+    .transform((val) => parseInt(val) || 1),
+  limit: z
+    .string()
+    .optional()
+    .transform((val) => parseInt(val) || 20),
   lga: z.string().optional(),
-  congestionLevel: z.enum(["free", "light", "moderate", "heavy", "severe"]).optional(),
+  congestionLevel: z
+    .enum(["free", "light", "moderate", "heavy", "severe"])
+    .optional(),
   isFlooded: z.enum(["true", "false"]).optional(),
-  severity: z.string().optional().transform((val) => parseInt(val)),
+  severity: z
+    .string()
+    .optional()
+    .transform((val) => parseInt(val)),
   floodLevel: z.enum(["none", "minor", "moderate", "severe"]).optional(),
+  latitude: z
+    .string()
+    .optional()
+    .transform((val) => parseFloat(val)),
+  longitude: z
+    .string()
+    .optional()
+    .transform((val) => parseFloat(val)),
+  maxDistance: z
+    .string()
+    .optional()
+    .transform((val) => parseInt(val) || 5000),
 });
 
-// Helper function to determine congestion level
+const trafficSchema = z.object({
+  segmentId: z.string().regex(/^SEG-\w+$/),
+  locationName: z.string(),
+  lga: z.string(),
+  coordinates: z.object({
+    type: z.literal("LineString"),
+    coordinates: z.array(z.array(z.number()).length(2)).min(2),
+  }),
+  congestionLevel: z.enum(["free", "light", "moderate", "heavy", "severe"]),
+  averageSpeed: z.number().min(0),
+  typicalSpeed: z.number().min(0),
+  travelTime: z.number().min(0),
+  freeFlowTime: z.number().min(0),
+  delay: z.number().min(0).optional(),
+  incidentType: z
+    .enum([
+      "accident",
+      "breakdown",
+      "construction",
+      "flood",
+      "weather",
+      "other",
+      null,
+    ])
+    .optional(),
+  incidentDescription: z.string().optional(),
+  isPassable: z.boolean().optional(),
+  severity: z.number().min(1).max(5).optional(),
+  suggestedDetour: z.string().optional(),
+  alternativeRoutes: z
+    .array(
+      z.object({
+        routeName: z.string(),
+        estimatedTime: z.number().min(0).optional(),
+        distanceKm: z.number().min(0).optional(),
+      })
+    )
+    .optional(),
+  weather: z.object({
+    condition: z.enum(["clear", "rain", "storm", "fog", "cloudy", "other"]),
+    temperature: z.number().optional(),
+    visibility: z.number().min(0).optional(),
+    precipitation: z.number().min(0).optional(),
+    recordedAt: z.string().datetime(),
+  }),
+  flood: z.object({
+    isFlooded: z.boolean(),
+    floodLevel: z.enum(["none", "minor", "moderate", "severe"]),
+    description: z.string().optional(),
+    recordedAt: z.string().datetime(),
+  }),
+  confidenceLevel: z.number().min(0).max(1).optional(),
+  source: z.string().optional(),
+});
+
+// Helper functions (unchanged)
 const getCongestionLevel = (trafficDuration, normalDuration) => {
   const ratio = trafficDuration / normalDuration;
   if (ratio < 1.1) return "free";
@@ -23,12 +102,10 @@ const getCongestionLevel = (trafficDuration, normalDuration) => {
   return "severe";
 };
 
-// Helper function to calculate average speed
 const calculateAverageSpeed = (distanceMeters, durationSeconds) => {
-  return Math.round((distanceMeters / 1000) / (durationSeconds / 3600)); // km/h
+  return Math.round(distanceMeters / 1000 / (durationSeconds / 3600));
 };
 
-// Helper function to determine flood level
 const getFloodLevel = (precipitation) => {
   if (precipitation > 15) return "severe";
   if (precipitation > 10) return "moderate";
@@ -36,7 +113,6 @@ const getFloodLevel = (precipitation) => {
   return "none";
 };
 
-// Helper function to get flood description
 const getFloodDescription = (floodLevel) => {
   switch (floodLevel) {
     case "severe":
@@ -50,11 +126,11 @@ const getFloodDescription = (floodLevel) => {
   }
 };
 
-// Fetch traffic data from Google Maps API
+// Fetch Google Maps traffic data
 export const fetchGoogleMapsTrafficData = async (segment) => {
   try {
     const { coordinates } = segment;
-    const [start, end] = coordinates.coordinates; // [[lng, lat], [lng, lat]]
+    const [start, end] = coordinates.coordinates;
 
     const response = await axios.get(
       `https://maps.googleapis.com/maps/api/directions/json?origin=${start[1]},${start[0]}&destination=${end[1]},${end[0]}&key=${process.env.GOOGLE_MAPS_API_KEY}`
@@ -64,37 +140,71 @@ export const fetchGoogleMapsTrafficData = async (segment) => {
       const route = response.data.routes[0];
       const leg = route.legs[0];
 
+      const weather = await Weather.findOne({
+        coordinates: {
+          $near: {
+            $geometry: {
+              type: "Point",
+              coordinates: segment.coordinates.coordinates[0],
+            },
+            $maxDistance: 5000,
+          },
+        },
+      });
+
       return {
-        congestionLevel: getCongestionLevel(leg.duration_in_traffic?.value || leg.duration.value, leg.duration.value),
-        averageSpeed: calculateAverageSpeed(leg.distance.value, leg.duration_in_traffic?.value || leg.duration.value),
-        typicalSpeed: calculateAverageSpeed(leg.distance.value, leg.duration.value),
-        travelTime: Math.round((leg.duration_in_traffic?.value || leg.duration.value) / 60),
+        congestionLevel: getCongestionLevel(
+          leg.duration_in_traffic?.value || leg.duration.value,
+          leg.duration.value
+        ),
+        averageSpeed: calculateAverageSpeed(
+          leg.distance.value,
+          leg.duration_in_traffic?.value || leg.duration.value
+        ),
+        typicalSpeed: calculateAverageSpeed(
+          leg.distance.value,
+          leg.duration.value
+        ),
+        travelTime: Math.round(
+          (leg.duration_in_traffic?.value || leg.duration.value) / 60
+        ),
         freeFlowTime: Math.round(leg.duration.value / 60),
-        delay: Math.round(((leg.duration_in_traffic?.value || leg.duration.value) - leg.duration.value) / 60),
+        delay: Math.round(
+          ((leg.duration_in_traffic?.value || leg.duration.value) -
+            leg.duration.value) /
+            60
+        ),
         confidenceLevel: 0.9,
+        alternativeRoutes: route.legs.map((l) => ({
+          routeName: l.summary || "Alternate Route",
+          estimatedTime: Math.round(l.duration.value / 60),
+          distanceKm: l.distance.value / 1000,
+        })),
+        weatherId: weather?._id,
       };
     }
-
     return null;
   } catch (error) {
-    console.error(`Error fetching Google Maps traffic data for segment ${segment.segmentId}:`, error.message);
+    console.error(
+      `Error fetching Google Maps data for segment ${segment.segmentId}:`,
+      error.message
+    );
     return null;
   }
 };
 
-// Fetch weather data from OpenWeather API
+// Fetch OpenWeather data
 export const fetchOpenWeatherData = async (coordinates) => {
   try {
-    const [lng, lat] = coordinates.coordinates[0]; // Use start point for weather
+    const [lng, lat] = coordinates.coordinates[0];
 
     const response = await axios.get(
       `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lng}&appid=${process.env.OPENWEATHER_API_KEY}&units=metric`
     );
 
     const weatherData = response.data;
-
     return {
-      condition: weatherData.weather[0].main,
+      condition: weatherData.weather[0].main.toLowerCase(),
       temperature: weatherData.main.temp,
       visibility: weatherData.visibility,
       precipitation: weatherData.rain ? weatherData.rain["1h"] || 0 : 0,
@@ -106,14 +216,11 @@ export const fetchOpenWeatherData = async (coordinates) => {
   }
 };
 
-// Fetch flood data (placeholder for real API)
+// Fetch flood data
 export const fetchFloodData = async (weatherData, coordinates) => {
   try {
-    // Placeholder: Use precipitation to estimate flood level
-    // In production, integrate with a flood API (e.g., Nigerian Meteorological Agency)
     const precipitation = weatherData?.precipitation || 0;
     const floodLevel = getFloodLevel(precipitation);
-
     return {
       isFlooded: floodLevel !== "none",
       floodLevel,
@@ -134,196 +241,284 @@ export const fetchFloodData = async (weatherData, coordinates) => {
 // Fetch and update external traffic data
 export const fetchExternalTrafficData = async (req, res) => {
   try {
-    const segments = await Traffic.distinct("segmentId");
+    // Check for admin token
+    if (req.headers["x-admin-token"] !== process.env.ADMIN_TOKEN) {
+      return res.status(403).json({ message: "Admin access required" });
+    }
 
+    const segments = await Traffic.distinct("segmentId");
     const updatedData = [];
 
     for (const segmentId of segments) {
-      const existingData = await Traffic.findOne({ segmentId }).sort({ recordedAt: -1 });
-      if (!existingData) {
-        console.log(`No existing data found for segment: ${segmentId}`);
-        continue;
-      }
+      const existingData = await Traffic.findOne({ segmentId }).sort({
+        recordedAt: -1,
+      });
+      if (!existingData) continue;
 
       const trafficData = await fetchGoogleMapsTrafficData(existingData);
-      if (!trafficData) {
-        console.log(`Failed to fetch traffic data for segment: ${segmentId}`);
-        continue;
-      }
+      if (!trafficData) continue;
 
       const weatherData = await fetchOpenWeatherData(existingData.coordinates);
-      const floodData = await fetchFloodData(weatherData, existingData.coordinates);
+      const floodData = await fetchFloodData(
+        weatherData,
+        existingData.coordinates
+      );
 
-      const updatedTrafficData = {
-        segmentId,
-        locationName: existingData.locationName,
-        lga: existingData.lga,
-        coordinates: existingData.coordinates,
-        ...trafficData,
-        weather: weatherData || existingData.weather,
-        flood: floodData,
-        recordedAt: new Date(),
+      const historicalTrendEntry = {
+        timestamp: new Date(),
+        congestionLevel: trafficData.congestionLevel,
+        avgSpeed: trafficData.averageSpeed,
+        floodLevel: floodData.floodLevel,
+        weatherCondition: weatherData?.condition || "clear",
       };
 
-      const traffic = new Traffic(updatedTrafficData);
-      await traffic.save();
-      updatedData.push(traffic);
+      // Update existing document or create new
+      const updatedTrafficData = await Traffic.findOneAndUpdate(
+        {
+          segmentId,
+          recordedAt: { $gte: new Date(Date.now() - 15 * 60 * 1000) },
+        }, // Within last 15 minutes
+        {
+          ...trafficData,
+          weather: weatherData || existingData.weather,
+          flood: floodData,
+          recordedAt: new Date(),
+          $push: { historicalTrend: historicalTrendEntry },
+        },
+        { new: true, upsert: true }
+      );
 
-      const io = req.app.get('io');
-      io.to(existingData.lga).emit('traffic-update', {
+      updatedData.push(updatedTrafficData);
+
+      const io = req.app.get("io");
+      io.to(existingData.lga).emit("trafficUpdate", {
         segmentId,
         trafficData: updatedTrafficData,
       });
     }
 
     res.status(200).json({
-      message: 'Traffic data updated successfully',
+      message: "Traffic data updated successfully",
       updatedCount: updatedData.length,
     });
   } catch (error) {
-    console.error('Error in fetchExternalTrafficData:', error.message);
-    res.status(500).json({ message: 'Failed to update traffic data', error: error.message });
+    console.error("Error in fetchExternalTrafficData:", error.message);
+    res
+      .status(500)
+      .json({ message: "Failed to update traffic data", error: error.message });
   }
 };
 
-// Get all traffic data with filters and pagination
+// Get all traffic data
 export const getAllTrafficData = async (req, res) => {
   try {
     const parsedQuery = querySchema.parse(req.query);
-    const { page, limit, lga, congestionLevel, isFlooded } = parsedQuery;
-    const skip = (page - 1) * limit;
+    const {
+      page,
+      limit,
+      lga,
+      congestionLevel,
+      isFlooded,
+      severity,
+      floodLevel,
+      latitude,
+      longitude,
+      maxDistance,
+    } = parsedQuery;
 
     let query = {};
     if (lga) query.lga = lga;
     if (congestionLevel) query.congestionLevel = congestionLevel;
-    if (isFlooded !== undefined) query["flood.isFlooded"] = isFlooded === "true";
+    if (isFlooded !== undefined)
+      query["flood.isFlooded"] = isFlooded === "true";
+    if (severity) query.severity = severity;
+    if (floodLevel) query["flood.floodLevel"] = floodLevel;
 
-    // Add geospatial query if user location is provided
-    if (req.query.latitude && req.query.longitude) {
-      const maxDistance = parseInt(req.query.maxDistance) || 5000; // meters
+    // Geospatial query for LineString
+    if (latitude && longitude) {
       query.coordinates = {
-        $near: {
+        $geoIntersects: {
           $geometry: {
             type: "Point",
-            coordinates: [parseFloat(req.query.longitude), parseFloat(req.query.latitude)],
+            coordinates: [longitude, latitude],
           },
-          $maxDistance: maxDistance,
         },
       };
     }
 
     const trafficData = await Traffic.find(query)
       .sort({ recordedAt: -1 })
-      .skip(skip)
+      .skip((page - 1) * limit)
       .limit(limit);
 
     const total = await Traffic.countDocuments(query);
 
     res.status(200).json({
+      message: "Traffic data retrieved successfully",
       trafficData,
       pagination: { total, page, pages: Math.ceil(total / limit) },
     });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res
+        .status(400)
+        .json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
     console.error("Error in getAllTrafficData:", error.message);
-    res.status(500).json({ message: "Failed to fetch traffic data", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Failed to fetch traffic data", error: error.message });
   }
 };
 
-// Get traffic data by segment ID
+// Get traffic by segment ID
 export const getTrafficBySegmentId = async (req, res) => {
   try {
-    const { segmentId } = req.params;
+    const { segmentId } = z
+      .object({ segmentId: z.string().regex(/^SEG-\w+$/) })
+      .parse(req.params);
 
-    const trafficData = await Traffic.findOne({ segmentId }).sort({ recordedAt: -1 });
+    const trafficData = await Traffic.findOne({ segmentId }).sort({
+      recordedAt: -1,
+    });
     if (!trafficData) {
-      return res.status(404).json({ message: `Traffic data not found for segment ${segmentId}` });
+      return res
+        .status(404)
+        .json({ message: `Traffic data not found for segment ${segmentId}` });
     }
 
-    res.status(200).json({ trafficData });
+    res
+      .status(200)
+      .json({ message: "Traffic data retrieved successfully", trafficData });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res
+        .status(400)
+        .json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
     console.error("Error in getTrafficBySegmentId:", error.message);
-    res.status(500).json({ message: "Failed to fetch traffic data", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Failed to fetch traffic data", error: error.message });
   }
 };
 
-// Get traffic data by LGA
+// Get traffic by LGA
 export const getTrafficByLGA = async (req, res) => {
   try {
+    const { lga } = z.object({ lga: z.string() }).parse(req.params);
     const parsedQuery = querySchema.parse(req.query);
-    const { lga } = req.params;
     const { page, limit } = parsedQuery;
-    const skip = (page - 1) * limit;
 
     const trafficData = await Traffic.find({ lga })
       .sort({ recordedAt: -1 })
-      .skip(skip)
+      .skip((page - 1) * limit)
       .limit(limit);
 
     const total = await Traffic.countDocuments({ lga });
 
     res.status(200).json({
+      message: "Traffic data retrieved successfully",
       trafficData,
       pagination: { total, page, pages: Math.ceil(total / limit) },
     });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res
+        .status(400)
+        .json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
     console.error("Error in getTrafficByLGA:", error.message);
-    res.status(500).json({ message: "Failed to fetch traffic data by LGA", error: error.message });
+    res
+      .status(500)
+      .json({
+        message: "Failed to fetch traffic data by LGA",
+        error: error.message,
+      });
   }
 };
 
-// Create new traffic data entry
+// Create new traffic data
 export const createTrafficData = async (req, res) => {
   try {
-    const trafficData = new Traffic(req.body);
+    if (req.headers["x-admin-token"] !== process.env.ADMIN_TOKEN) {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+
+    const parsedBody = trafficSchema.parse(req.body);
+    const trafficData = new Traffic({
+      ...parsedBody,
+      recordedAt: new Date(),
+    });
     await trafficData.save();
 
-    const io = req.app.get('io');
-    io.to(trafficData.lga).emit('traffic-update', { segmentId: trafficData.segmentId, trafficData });
+    const io = req.app.get("io");
+    io.to(trafficData.lga).emit("trafficUpdate", {
+      segmentId: trafficData.segmentId,
+      trafficData,
+    });
 
     res.status(201).json({
-      message: 'Traffic data created successfully',
+      message: "Traffic data created successfully",
       trafficData,
     });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res
+        .status(400)
+        .json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
     console.error("Error in createTrafficData:", error.message);
-    res.status(500).json({ message: "Failed to create traffic data", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Failed to create traffic data", error: error.message });
   }
 };
 
 // Update traffic data
 export const updateTrafficData = async (req, res) => {
   try {
-    const { segmentId } = req.params;
-
-    let trafficData = await Traffic.findOne({ segmentId });
-    if (!trafficData) {
-      trafficData = new Traffic({ segmentId, ...req.body });
-    } else {
-      Object.assign(trafficData, req.body);
+    if (req.headers["x-admin-token"] !== process.env.ADMIN_TOKEN) {
+      return res.status(403).json({ message: "Admin access required" });
     }
 
-    await trafficData.save();
+    const { segmentId } = z
+      .object({ segmentId: z.string().regex(/^SEG-\w+$/) })
+      .parse(req.params);
+    const parsedBody = trafficSchema.partial().parse(req.body);
 
-    const io = req.app.get('io');
-    io.to(trafficData.lga).emit('traffic-update', { segmentId, trafficData });
+    const trafficData = await Traffic.findOneAndUpdate(
+      { segmentId },
+      { ...parsedBody, recordedAt: new Date() },
+      { new: true, upsert: true }
+    );
+
+    const io = req.app.get("io");
+    io.to(trafficData.lga).emit("trafficUpdate", { segmentId, trafficData });
 
     res.status(200).json({
-      message: 'Traffic data updated successfully',
+      message: "Traffic data updated successfully",
       trafficData,
     });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res
+        .status(400)
+        .json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
     console.error("Error in updateTrafficData:", error.message);
-    res.status(500).json({ message: "Failed to update traffic data", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Failed to update traffic data", error: error.message });
   }
 };
 
 // Get traffic data for route planning
 export const getRouteTraffic = async (req, res) => {
   try {
-    const { segments } = req.body;
-    if (!segments || !Array.isArray(segments) || segments.length === 0) {
-      return res.status(400).json({ message: 'Segments array is required' });
-    }
+    const { segments } = z
+      .object({ segments: z.array(z.string().regex(/^SEG-\w+$/)) })
+      .parse(req.body);
 
     const trafficPromises = segments.map((segmentId) =>
       Traffic.findOne({ segmentId }).sort({ recordedAt: -1 })
@@ -345,6 +540,7 @@ export const getRouteTraffic = async (req, res) => {
     });
 
     res.status(200).json({
+      message: "Route traffic data retrieved successfully",
       segments: validTrafficData,
       routeSummary: {
         totalDelay,
@@ -355,8 +551,18 @@ export const getRouteTraffic = async (req, res) => {
       },
     });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res
+        .status(400)
+        .json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
     console.error("Error in getRouteTraffic:", error.message);
-    res.status(500).json({ message: "Failed to fetch route traffic data", error: error.message });
+    res
+      .status(500)
+      .json({
+        message: "Failed to fetch route traffic data",
+        error: error.message,
+      });
   }
 };
 
@@ -365,7 +571,6 @@ export const getTrafficIncidents = async (req, res) => {
   try {
     const parsedQuery = querySchema.parse(req.query);
     const { page, limit, lga, severity } = parsedQuery;
-    const skip = (page - 1) * limit;
 
     let query = { incidentType: { $exists: true, $ne: null } };
     if (lga) query.lga = lga;
@@ -373,18 +578,29 @@ export const getTrafficIncidents = async (req, res) => {
 
     const incidents = await Traffic.find(query)
       .sort({ recordedAt: -1 })
-      .skip(skip)
+      .skip((page - 1) * limit)
       .limit(limit);
 
     const total = await Traffic.countDocuments(query);
 
     res.status(200).json({
+      message: "Traffic incidents retrieved successfully",
       incidents,
       pagination: { total, page, pages: Math.ceil(total / limit) },
     });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res
+        .status(400)
+        .json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
     console.error("Error in getTrafficIncidents:", error.message);
-    res.status(500).json({ message: "Failed to fetch traffic incidents", error: error.message });
+    res
+      .status(500)
+      .json({
+        message: "Failed to fetch traffic incidents",
+        error: error.message,
+      });
   }
 };
 
@@ -393,7 +609,6 @@ export const getFloodedRoads = async (req, res) => {
   try {
     const parsedQuery = querySchema.parse(req.query);
     const { page, limit, lga, floodLevel } = parsedQuery;
-    const skip = (page - 1) * limit;
 
     let query = { "flood.isFlooded": true };
     if (lga) query.lga = lga;
@@ -401,17 +616,25 @@ export const getFloodedRoads = async (req, res) => {
 
     const floodedRoads = await Traffic.find(query)
       .sort({ "flood.recordedAt": -1 })
-      .skip(skip)
+      .skip((page - 1) * limit)
       .limit(limit);
 
     const total = await Traffic.countDocuments(query);
 
     res.status(200).json({
+      message: "Flooded roads retrieved successfully",
       floodedRoads,
       pagination: { total, page, pages: Math.ceil(total / limit) },
     });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res
+        .status(400)
+        .json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
     console.error("Error in getFloodedRoads:", error.message);
-    res.status(500).json({ message: "Failed to fetch flooded roads", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Failed to fetch flooded roads", error: error.message });
   }
 };

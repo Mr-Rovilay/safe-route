@@ -1,285 +1,259 @@
-import Search from '../models/SearchSchema.js';
-import User from '../models/UserSchema.js';
-import Traffic from '../models/TrafficSchema.js';
-import Weather from '../models/WeatherSchema.js';
-import Flood from '../models/FloodSchema.js';
+import Search from "../models/SearchSchema.js";
+import User from "../models/UserSchema.js";
+import Traffic from "../models/TrafficSchema.js";
+import Weather from "../models/WeatherSchema.js";
+import Flood from "../models/FloodSchema.js";
+import { z } from "zod";
 
-// Create a new search record with current data
+// Input validation schemas
+const querySchema = z.object({
+  page: z.string().optional().transform((val) => parseInt(val) || 1),
+  limit: z.string().optional().transform((val) => parseInt(val) || 20),
+  userId: z.string().optional(),
+  q: z.string().optional(),
+  lng: z.string().optional().transform((val) => parseFloat(val)),
+  lat: z.string().optional().transform((val) => parseFloat(val)),
+  distance: z.string().optional().transform((val) => parseInt(val) || 10000),
+  days: z.string().optional().transform((val) => parseInt(val) || 7),
+});
+
+const searchSchema = z.object({
+  query: z.string(),
+  location: z.object({
+    type: z.literal("Point").optional(),
+    coordinates: z.array(z.number()).length(2),
+  }),
+});
+
+// Create a new search record
 export const createSearch = async (req, res) => {
   try {
-    const { query, location } = req.body;
-    
-    // Validate required fields
-    if (!query || !location || !location.coordinates) {
-      return res.status(400).json({ 
-        message: 'Query and location with coordinates are required' 
-      });
-    }
-    
-    // Get current traffic data for the location (if available)
-    let trafficData = {};
-    try {
-      // Find the nearest traffic segment
-      const traffic = await Traffic.findOne({
-        location: {
-          $near: {
-            $geometry: {
-              type: 'Point',
-              coordinates: location.coordinates
-            },
-            $maxDistance: 5000 // 5km radius
-          }
-        }
-      }).sort({ recordedAt: -1 });
-      
-      if (traffic) {
-        trafficData = {
-          congestionLevel: traffic.congestionLevel,
-          avgSpeed: traffic.averageSpeed,
-          incidents: traffic.incidentType ? [traffic.incidentType] : []
-        };
-      }
-    } catch (error) {
-      console.error('Error fetching traffic data:', error);
-    }
-    
-    // Get current weather data for the location (if available)
-    let weatherData = {};
-    try {
-      // Find the nearest weather data
-      const weather = await Weather.findOne({
-        'coordinates.lat': { $exists: true },
-        'coordinates.lng': { $exists: true }
-      }).sort({
-        recordedAt: -1 // Get the most recent
-      });
-      
-      if (weather) {
-        weatherData = {
-          condition: weather.condition,
-          temperature: weather.temperature,
-          humidity: weather.humidity,
-          precipitation: weather.rainfall,
-          windSpeed: weather.windSpeed
-        };
-      }
-    } catch (error) {
-      console.error('Error fetching weather data:', error);
-    }
-    
-    // Get current flood data for the location (if available)
-    let floodData = {
-      severity: 'none',
-      waterLevel: 0,
-      description: ''
-    };
-    try {
-      // Find the nearest flood data
-      const flood = await Flood.findOne({
-        coordinates: {
-          $near: {
-            $geometry: {
-              type: 'Point',
-              coordinates: location.coordinates
-            },
-            $maxDistance: 5000 // 5km radius
-          }
-        }
-      }).sort({ recordedAt: -1 });
-      
-      if (flood) {
-        floodData = {
-          severity: flood.severity,
-          waterLevel: flood.waterLevel || 0,
-          description: flood.description || ''
-        };
-      }
-    } catch (error) {
-      console.error('Error fetching flood data:', error);
-    }
-    
-    // Create new search record
-    const search = new Search({
-      userId: req.user ? req.user._id : null,
-      query,
-      location: {
-        type: 'Point',
-        coordinates: location.coordinates
+    const parsedBody = searchSchema.parse(req.body);
+    const { query, location } = parsedBody;
+    const lga = req.body.lga; // Optional LGA for Socket.IO room
+
+    let trafficId, weatherId, floodId;
+
+    // Fetch nearest traffic data
+    const traffic = await Traffic.findOne({
+      coordinates: {
+        $near: {
+          $geometry: { type: "Point", coordinates: location.coordinates },
+          $maxDistance: 5000,
+        },
       },
-      traffic: trafficData,
-      weather: weatherData,
-      flood: floodData
+    }).sort({ recordedAt: -1 });
+    if (traffic) trafficId = traffic._id;
+
+    // Fetch nearest weather data
+    const weather = await Weather.findOne({
+      coordinates: {
+        $near: {
+          $geometry: { type: "Point", coordinates: location.coordinates },
+          $maxDistance: 5000,
+        },
+      },
+    }).sort({ recordedAt: -1 });
+    if (weather) weatherId = weather._id;
+
+    // Fetch nearest flood data
+    const flood = await Flood.findOne({
+      coordinates: {
+        $near: {
+          $geometry: { type: "Point", coordinates: location.coordinates },
+          $maxDistance: 5000,
+        },
+      },
+    }).sort({ recordedAt: -1 });
+    if (flood) floodId = flood._id;
+
+    const search = new Search({
+      userId: req.user._id,
+      query,
+      location: { type: "Point", coordinates: location.coordinates },
+      trafficId,
+      weatherId,
+      floodId,
+      createdAt: new Date(),
     });
-    
+
     await search.save();
-    
-    // If user is authenticated, update user's search history
-    if (req.user) {
-      await User.findByIdAndUpdate(req.user._id, {
-        $push: { searchHistory: search._id }
-      });
+
+    // Update user's searchHistory
+    await User.findByIdAndUpdate(req.user._id, {
+      $push: { searchHistory: search._id },
+    });
+
+    // Emit search event
+    const io = req.app.get("io");
+    if (lga) {
+      io.to(lga).emit("searchCreated", { search, traffic, weather, flood });
     }
-    
+
+    // Notify active Trips
+    if (flood && flood.severity === "high") {
+      const trips = await mongoose.model("Trip").find({
+        "route.segmentId": { $in: flood.affectedRoads },
+        status: "active",
+      });
+      for (const trip of trips) {
+        trip.alerts.push({
+          message: `Flood detected near ${query}: ${flood.advisoryMessage}`,
+          type: "search",
+          severity: "critical",
+          timestamp: new Date(),
+        });
+        await trip.save();
+        io.to(`user:${trip.userId}`).emit("tripAlert", {
+          tripId: trip._id,
+          alert: trip.alerts[trip.alerts.length - 1],
+        });
+      }
+    }
+
     res.status(201).json({
-      message: 'Search recorded successfully',
-      search
+      message: "Search recorded successfully",
+      search: { ...search.toObject(), traffic, weather, flood },
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
+    console.error("Error in createSearch:", error.message);
+    res.status(500).json({ message: "Failed to create search", error: error.message });
   }
 };
 
-// Get all search records (with pagination and filtering)
+// Get all search records
 export const getAllSearches = async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-    const skip = (page - 1) * limit;
-    const userId = req.query.userId;
-    const query = req.query.q;
-    
+    if (req.headers["x-admin-token"] !== process.env.ADMIN_TOKEN) {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+
+    const parsedQuery = querySchema.parse(req.query);
+    const { page, limit, userId, q } = parsedQuery;
+
     let filter = {};
-    
-    // Filter by user ID if provided
-    if (userId) {
-      filter.userId = userId;
-    }
-    
-    // Filter by query text if provided
-    if (query) {
-      filter.$text = { $search: query };
-    }
-    
+    if (userId) filter.userId = userId;
+    if (q) filter.$text = { $search: q };
+
     const searches = await Search.find(filter)
-      .populate('userId', 'username email')
+      .populate("userId", "username email")
+      .populate("trafficId")
+      .populate("weatherId")
+      .populate("floodId")
       .sort({ createdAt: -1 })
-      .skip(skip)
+      .skip((page - 1) * limit)
       .limit(limit);
-    
+
     const total = await Search.countDocuments(filter);
-    
+
     res.json({
+      message: "Search records retrieved successfully",
       searches,
-      pagination: {
-        total,
-        page,
-        pages: Math.ceil(total / limit)
-      }
+      pagination: { total, page, pages: Math.ceil(total / limit) },
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
+    console.error("Error in getAllSearches:", error.message);
+    res.status(500).json({ message: "Failed to fetch searches", error: error.message });
   }
 };
 
-// Get search records for a specific user
+// Get user search records
 export const getUserSearches = async (req, res) => {
   try {
-    const { userId } = req.params;
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-    const skip = (page - 1) * limit;
-    
-    // Check if user has permission to view these searches
-    if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Not authorized to view these searches' });
+    const { userId } = z.object({ userId: z.string() }).parse(req.params);
+    const parsedQuery = querySchema.parse(req.query);
+    const { page, limit } = parsedQuery;
+
+    if (req.user._id.toString() !== userId && req.headers["x-admin-token"] !== process.env.ADMIN_TOKEN) {
+      return res.status(403).json({ message: "Not authorized to view these searches" });
     }
-    
+
     const searches = await Search.find({ userId })
+      .populate("trafficId")
+      .populate("weatherId")
+      .populate("floodId")
       .sort({ createdAt: -1 })
-      .skip(skip)
+      .skip((page - 1) * limit)
       .limit(limit);
-    
+
     const total = await Search.countDocuments({ userId });
-    
+
     res.json({
+      message: "User searches retrieved successfully",
       searches,
-      pagination: {
-        total,
-        page,
-        pages: Math.ceil(total / limit)
-      }
+      pagination: { total, page, pages: Math.ceil(total / limit) },
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
+    console.error("Error in getUserSearches:", error.message);
+    res.status(500).json({ message: "Failed to fetch user searches", error: error.message });
   }
 };
 
 // Get popular search queries
 export const getPopularSearches = async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 10;
-    
+    const { limit } = querySchema.parse(req.query);
+
     const popularSearches = await Search.aggregate([
-      {
-        $group: {
-          _id: '$query',
-          count: { $sum: 1 },
-          locations: { $push: '$location.coordinates' }
-        }
-      },
-      {
-        $sort: { count: -1 }
-      },
-      {
-        $limit: limit
-      }
+      { $group: { _id: "$query", count: { $sum: 1 }, locations: { $push: "$location.coordinates" } } },
+      { $sort: { count: -1 } },
+      { $limit: limit },
     ]);
-    
-    res.json({ popularSearches });
+
+    res.json({ message: "Popular searches retrieved successfully", popularSearches });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("Error in getPopularSearches:", error.message);
+    res.status(500).json({ message: "Failed to fetch popular searches", error: error.message });
   }
 };
 
-// Get search trends by location
+// Get search trends
 export const getSearchTrends = async (req, res) => {
   try {
-    const { days = 7 } = req.query;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - parseInt(days));
-    
+    const { days } = querySchema.parse(req.query);
+    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
     const trends = await Search.aggregate([
-      {
-        $match: {
-          createdAt: { $gte: startDate }
-        }
-      },
+      { $match: { createdAt: { $gte: startDate } } },
       {
         $group: {
           _id: {
-            date: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-            query: '$query'
+            date: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+            query: "$query",
           },
-          count: { $sum: 1 }
-        }
+          count: { $sum: 1 },
+        },
       },
-      {
-        $sort: { '_id.date': 1, count: -1 }
-      }
+      { $sort: { "_id.date": 1, count: -1 } },
     ]);
-    
-    // Group by date
+
     const trendsByDate = {};
-    trends.forEach(trend => {
+    trends.forEach((trend) => {
       const date = trend._id.date;
-      if (!trendsByDate[date]) {
-        trendsByDate[date] = [];
-      }
-      trendsByDate[date].push({
-        query: trend._id.query,
-        count: trend.count
-      });
+      if (!trendsByDate[date]) trendsByDate[date] = [];
+      trendsByDate[date].push({ query: trend._id.query, count: trend.count });
     });
-    
-    // Get top 5 queries for each date
-    const result = Object.keys(trendsByDate).map(date => ({
-      date,
-      topQueries: trendsByDate[date].slice(0, 5)
-    }));
-    
-    res.json({ trends: result });
+
+    const result = Object.keys(trendsByDate)
+      .map((date) => ({
+        date,
+        topQueries: trendsByDate[date].slice(0, 5),
+      }))
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    res.json({ message: "Search trends retrieved successfully", trends: result });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("Error in getSearchTrends:", error.message);
+    res.status(500).json({ message: "Failed to fetch search trends", error: error.message });
   }
 };
 
@@ -287,108 +261,95 @@ export const getSearchTrends = async (req, res) => {
 export const getSearchStats = async (req, res) => {
   try {
     const totalSearches = await Search.countDocuments();
-    
-    const uniqueQueries = await Search.distinct('query');
-    
+    const uniqueQueries = await Search.distinct("query");
     const topQueries = await Search.aggregate([
-      {
-        $group: {
-          _id: '$query',
-          count: { $sum: 1 }
-        }
-      },
-      {
-        $sort: { count: -1 }
-      },
-      {
-        $limit: 10
-      }
+      { $group: { _id: "$query", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 10 },
     ]);
-    
     const searchesByDay = await Search.aggregate([
       {
         $group: {
-          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-          count: { $sum: 1 }
-        }
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+          count: { $sum: 1 },
+        },
       },
-      {
-        $sort: { '_id': 1 }
-      },
-      {
-        $limit: 30 // Last 30 days
-      }
+      { $sort: { _id: 1 } },
+      { $limit: 30 },
     ]);
-    
+
     res.json({
+      message: "Search statistics retrieved successfully",
       totalSearches,
       uniqueQueriesCount: uniqueQueries.length,
       topQueries,
-      searchesByDay
+      searchesByDay,
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("Error in getSearchStats:", error.message);
+    res.status(500).json({ message: "Failed to fetch search statistics", error: error.message });
   }
 };
 
 // Get searches near a location
 export const getSearchesNearLocation = async (req, res) => {
   try {
-    const { lng, lat, distance = 10000 } = req.query; // Distance in meters
-    
+    const { lng, lat, distance } = querySchema.parse(req.query);
     if (!lng || !lat) {
-      return res.status(400).json({ 
-        message: 'Longitude and latitude are required' 
-      });
+      return res.status(400).json({ message: "Longitude and latitude are required" });
     }
-    
+
     const searches = await Search.find({
       location: {
         $near: {
-          $geometry: {
-            type: 'Point',
-            coordinates: [parseFloat(lng), parseFloat(lat)]
-          },
-          $maxDistance: parseInt(distance)
-        }
-      }
+          $geometry: { type: "Point", coordinates: [lng, lat] },
+          $maxDistance: distance,
+        },
+      },
     })
-    .populate('userId', 'username email')
-    .sort({ createdAt: -1 });
-    
-    res.json({ searches });
+      .populate("userId", "username email")
+      .populate("trafficId")
+      .populate("weatherId")
+      .populate("floodId")
+      .sort({ createdAt: -1 });
+
+    res.json({ message: "Searches near location retrieved successfully", searches });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
+    console.error("Error in getSearchesNearLocation:", error.message);
+    res.status(500).json({ message: "Failed to fetch searches near location", error: error.message });
   }
 };
 
 // Delete a search record
 export const deleteSearch = async (req, res) => {
   try {
-    const { id } = req.params;
-    
+    const { id } = z.object({ id: z.string() }).parse(req.params);
     const search = await Search.findById(id);
-    
     if (!search) {
-      return res.status(404).json({ message: 'Search record not found' });
+      return res.status(404).json({ message: "Search record not found" });
     }
-    
-    // Check if user has permission to delete this search
-    if (search.userId && search.userId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Not authorized to delete this search' });
+
+    if (search.userId.toString() !== req.user._id.toString() && req.headers["x-admin-token"] !== process.env.ADMIN_TOKEN) {
+      return res.status(403).json({ message: "Not authorized to delete this search" });
     }
-    
-    await search.remove();
-    
-    // If user is authenticated, remove from user's search history
-    if (req.user && search.userId) {
-      await User.findByIdAndUpdate(req.user._id, {
-        $pull: { searchHistory: id }
-      });
-    }
-    
-    res.json({ message: 'Search record deleted successfully' });
+
+    await search.deleteOne();
+    await User.findByIdAndUpdate(search.userId, {
+      $pull: { searchHistory: id },
+    });
+
+    const io = req.app.get("io");
+    io.to(`user:${search.userId}`).emit("searchDeleted", { searchId: id });
+
+    res.json({ message: "Search record deleted successfully" });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ message: error.errors.map((e) => e.message).join(", ") });
+    }
+    console.error("Error in deleteSearch:", error.message);
+    res.status(500).json({ message: "Failed to delete search", error: error.message });
   }
 };

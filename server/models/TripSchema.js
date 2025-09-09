@@ -1,47 +1,78 @@
 import mongoose from "mongoose";
 
 const tripSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-
-  // 🔹 Trip details
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+    index: true // Added for performance
+  },
   origin: {
     address: { type: String },
-    coordinates: { lat: Number, lng: Number }
+    coordinates: {
+      type: { type: String, enum: ["Point"], default: "Point" },
+      coordinates: { type: [Number], required: true } // [lng, lat]
+    }
   },
   destination: {
     address: { type: String },
-    coordinates: { lat: Number, lng: Number }
+    coordinates: {
+      type: { type: String, enum: ["Point"], default: "Point" },
+      coordinates: { type: [Number], required: true } // [lng, lat]
+    }
   },
   route: [{
-    segmentId: { type: String },                       // links to Traffic.segmentId
-    locationName: { type: String },                    // e.g. "Third Mainland Bridge"
-    congestionLevel: { type: String },                 // pulled from Traffic
-    avgSpeed: { type: Number },
-    floodLevel: { type: String },
-    weatherCondition: { type: String },
-    travelTime: { type: Number }
+    segmentId: {
+      type: String,
+      validate: {
+        validator: async function (v) {
+          if (!v) return true; // Allow null
+          const traffic = await mongoose.model("Traffic").findOne({ segmentId: v });
+          return !!traffic; // Ensure segmentId exists
+        },
+        message: "Invalid Traffic segmentId"
+      }
+    },
+    locationName: { type: String }, // e.g., "Third Mainland Bridge"
+    congestionLevel: {
+      type: String,
+      enum: ["low", "moderate", "high", "severe"],
+      default: "low"
+    },
+    avgSpeed: { type: Number, min: 0 },
+    floodLevel: {
+      type: String,
+      enum: ["none", "low", "moderate", "high"],
+      default: "none"
+    },
+    weatherCondition: {
+      type: String,
+      enum: ["clear", "rain", "storm", "fog", "other"],
+      default: "clear"
+    },
+    travelTime: { type: Number, min: 0 } // In minutes
   }],
-
-  // 🔹 Trip status
-  status: { type: String, enum: ["planned", "active", "completed", "cancelled"], default: "planned" },
+  status: {
+    type: String,
+    enum: ["planned", "active", "completed", "cancelled"],
+    default: "planned"
+  },
   startedAt: { type: Date },
   endedAt: { type: Date },
-
-  // 🔹 Alerts for user during trip
   alerts: [{
-    message: { type: String },                         // e.g. "Accident 200m ahead"
-    type: { type: String, enum: ["traffic", "flood", "weather"] },
+    message: { type: String, required: true },
+    type: { type: String, enum: ["traffic", "flood", "weather"], required: true },
     severity: { type: String, enum: ["info", "warning", "critical"], default: "info" },
     timestamp: { type: Date, default: Date.now }
   }],
-
-  // 🔹 Analytics
-  estimatedTime: { type: Number },                     // ETA when planned
-  actualTime: { type: Number },                        // final duration
+  estimatedTime: { type: Number, min: 0 }, // In minutes
+  actualTime: { type: Number, min: 0 }, // In minutes
   recordedAt: { type: Date, default: Date.now }
 });
 
-tripSchema.index({ userId: 1, status: 1 });
+tripSchema.index({ "origin.coordinates": "2dsphere", "destination.coordinates": "2dsphere" });
+tripSchema.index({ userId: 1, status: 1, recordedAt: -1 }); // Enhanced index
+tripSchema.index({ "alerts.type": 1, "alerts.severity": 1 }); // Added for alert filtering
 
 const Trip = mongoose.model("Trip", tripSchema);
 export default Trip;

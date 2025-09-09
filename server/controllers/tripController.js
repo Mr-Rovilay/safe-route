@@ -1,76 +1,126 @@
-import Trip from '../models/TripSchema.js';
-import User from '../models/UserSchema.js';
+import mongoose from "mongoose";
+import Trip from "../models/TripSchema.js"; // Corrected import
+import User from "../models/UserSchema.js"; // Corrected import
+import { z } from "zod"; // Added for validation
+
+// Input validation schemas
+const coordinatesSchema = z.object({
+  type: z.literal("Point").optional(),
+  coordinates: z.array(z.number()).length(2),
+});
+
+const routeSchema = z.object({
+  segmentId: z.string().optional(),
+  locationName: z.string().optional(),
+  congestionLevel: z.enum(["low", "moderate", "high", "severe"]).optional(),
+  avgSpeed: z.number().min(0).optional(),
+  floodLevel: z.enum(["none", "low", "moderate", "high"]).optional(),
+  weatherCondition: z.enum(["clear", "rain", "storm", "fog", "other"]).optional(),
+  travelTime: z.number().min(0).optional(),
+});
+
+const createTripSchema = z.object({
+  origin: z.object({
+    address: z.string().optional(),
+    coordinates: coordinatesSchema,
+  }),
+  destination: z.object({
+    address: z.string().optional(),
+    coordinates: coordinatesSchema,
+  }),
+  route: z.array(routeSchema).optional(),
+  estimatedTime: z.number().min(0).optional(),
+});
+
+const updateTripSchema = z.object({
+  origin: z.object({
+    address: z.string().optional(),
+    coordinates: coordinatesSchema.optional(),
+  }).optional(),
+  destination: z.object({
+    address: z.string().optional(),
+    coordinates: coordinatesSchema.optional(),
+  }).optional(),
+  route: z.array(routeSchema).optional(),
+  status: z.enum(["planned", "active", "completed", "cancelled"]).optional(),
+  estimatedTime: z.number().min(0).optional(),
+  actualTime: z.number().min(0).optional(),
+});
+
+const alertSchema = z.object({
+  message: z.string(),
+  type: z.enum(["traffic", "flood", "weather"]),
+  severity: z.enum(["info", "warning", "critical"]).optional(),
+});
 
 // Create a new trip
 export const createTrip = async (req, res) => {
   try {
-    const { 
-      origin, 
-      destination, 
-      route = [],
-      estimatedTime 
-    } = req.body;
-    
-    // Validate required fields
-    if (!origin || !destination || !origin.coordinates || !destination.coordinates) {
-      return res.status(400).json({ message: 'Origin and destination with coordinates are required' });
-    }
-    
-    // Create new trip
+    const parsedBody = createTripSchema.parse(req.body); // Validate input
+    const { origin, destination, route = [], estimatedTime } = parsedBody;
+
     const trip = new Trip({
       userId: req.user._id,
-      origin,
-      destination,
+      origin: {
+        address: origin.address,
+        coordinates: { type: "Point", coordinates: origin.coordinates },
+      },
+      destination: {
+        address: destination.address,
+        coordinates: { type: "Point", coordinates: destination.coordinates },
+      },
       route,
-      estimatedTime
+      estimatedTime,
     });
-    
+
     await trip.save();
-    
+
     // Populate user reference
-    await trip.populate('userId', 'username email profilePicture');
-    
+    await trip.populate("userId", "username email profilePicture");
+
+    // Join user to their room
+    const io = req.app.get("io");
+    io.to(req.user._id.toString()).emit("joinUserRoom", { userId: req.user._id });
+
     res.status(201).json({
-      message: 'Trip created successfully',
-      trip
+      message: "Trip created successfully",
+      trip,
     });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ message: error.errors.map(e => e.message).join(", ") });
+    }
+    console.error("Error in createTrip:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
 
-// Get all trips for a user (with pagination and filtering)
+// Get all trips for a user
 export const getUserTrips = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
     const status = req.query.status;
-    
+
     let query = { userId: req.user._id };
-    
-    // Filter by status if provided
-    if (status) {
-      query.status = status;
-    }
-    
+    if (status) query.status = status;
+
     const trips = await Trip.find(query)
-      .populate('userId', 'username email profilePicture')
+      .populate("userId", "username email profilePicture")
       .sort({ recordedAt: -1 })
       .skip(skip)
       .limit(limit);
-    
+
     const total = await Trip.countDocuments(query);
-    
+
     res.json({
+      message: "Trips retrieved successfully",
       trips,
-      pagination: {
-        total,
-        page,
-        pages: Math.ceil(total / limit)
-      }
+      pagination: { total, page, pages: Math.ceil(total / limit) },
     });
   } catch (error) {
+    console.error("Error in getUserTrips:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
@@ -79,19 +129,20 @@ export const getUserTrips = async (req, res) => {
 export const getTripById = async (req, res) => {
   try {
     const trip = await Trip.findById(req.params.id)
-      .populate('userId', 'username email profilePicture');
-    
+      .populate("userId", "username email profilePicture");
+
     if (!trip) {
-      return res.status(404).json({ message: 'Trip not found' });
+      return res.status(404).json({ message: "Trip not found" });
     }
-    
-    // Check if user has permission to view this trip
-    if (trip.userId._id.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Not authorized to view this trip' });
+
+    // Check permission (removed role check)
+    if (trip.userId._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "Not authorized to view this trip" });
     }
-    
-    res.json({ trip });
+
+    res.json({ message: "Trip retrieved successfully", trip });
   } catch (error) {
+    console.error("Error in getTripById:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
@@ -99,44 +150,55 @@ export const getTripById = async (req, res) => {
 // Update a trip
 export const updateTrip = async (req, res) => {
   try {
+    const parsedBody = updateTripSchema.parse(req.body); // Validate input
+    const { origin, destination, route, status, estimatedTime, actualTime } = parsedBody;
+
     const trip = await Trip.findById(req.params.id);
-    
     if (!trip) {
-      return res.status(404).json({ message: 'Trip not found' });
+      return res.status(404).json({ message: "Trip not found" });
     }
-    
-    // Check if user has permission to update this trip
-    if (trip.userId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Not authorized to update this trip' });
+
+    // Check permission (removed role check)
+    if (trip.userId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "Not authorized to update this trip" });
     }
-    
-    const { 
-      origin, 
-      destination, 
-      route, 
-      status,
-      estimatedTime,
-      actualTime
-    } = req.body;
-    
-    // Update fields if provided
-    if (origin) trip.origin = origin;
-    if (destination) trip.destination = destination;
+
+    if (origin) {
+      trip.origin = {
+        address: origin.address,
+        coordinates: origin.coordinates ? { type: "Point", coordinates: origin.coordinates } : trip.origin.coordinates,
+      };
+    }
+    if (destination) {
+      trip.destination = {
+        address: destination.address,
+        coordinates: destination.coordinates ? { type: "Point", coordinates: destination.coordinates } : trip.destination.coordinates,
+      };
+    }
     if (route) trip.route = route;
     if (status) trip.status = status;
     if (estimatedTime) trip.estimatedTime = estimatedTime;
     if (actualTime) trip.actualTime = actualTime;
-    
+
     await trip.save();
-    
+
     // Populate user reference
-    await trip.populate('userId', 'username email profilePicture');
-    
-    res.json({
-      message: 'Trip updated successfully',
-      trip
+    await trip.populate("userId", "username email profilePicture");
+
+    // Emit update event
+    const io = req.app.get("io");
+    io.to(`user:${trip.userId}`).emit("tripUpdated", {
+      tripId: trip._id,
+      updatedFields: parsedBody,
+      timestamp: new Date(),
     });
+
+    res.json({ message: "Trip updated successfully", trip });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ message: error.errors.map(e => e.message).join(", ") });
+    }
+    console.error("Error in updateTrip:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
@@ -145,20 +207,24 @@ export const updateTrip = async (req, res) => {
 export const deleteTrip = async (req, res) => {
   try {
     const trip = await Trip.findById(req.params.id);
-    
     if (!trip) {
-      return res.status(404).json({ message: 'Trip not found' });
+      return res.status(404).json({ message: "Trip not found" });
     }
-    
-    // Check if user has permission to delete this trip
-    if (trip.userId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Not authorized to delete this trip' });
+
+    // Check permission (removed role check)
+    if (trip.userId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "Not authorized to delete this trip" });
     }
-    
-    await trip.remove();
-    
-    res.json({ message: 'Trip deleted successfully' });
+
+    await trip.deleteOne();
+
+    // Emit delete event
+    const io = req.app.get("io");
+    io.to(`user:${trip.userId}`).emit("tripDeleted", { tripId: trip._id, timestamp: new Date() });
+
+    res.json({ message: "Trip deleted successfully" });
   } catch (error) {
+    console.error("Error in deleteTrip:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
@@ -167,47 +233,44 @@ export const deleteTrip = async (req, res) => {
 export const startTrip = async (req, res) => {
   try {
     const trip = await Trip.findById(req.params.id);
-    
     if (!trip) {
-      return res.status(404).json({ message: 'Trip not found' });
+      return res.status(404).json({ message: "Trip not found" });
     }
-    
-    // Check if user has permission to start this trip
+
+    // Check permission
     if (trip.userId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Not authorized to start this trip' });
+      return res.status(403).json({ message: "Not authorized to start this trip" });
     }
-    
-    // Check if trip is already started or completed
-    if (trip.status === 'active') {
-      return res.status(400).json({ message: 'Trip is already active' });
+
+    if (trip.status === "active") {
+      return res.status(400).json({ message: "Trip is already active" });
     }
-    
-    if (trip.status === 'completed') {
-      return res.status(400).json({ message: 'Trip is already completed' });
+
+    if (trip.status === "completed") {
+      return res.status(400).json({ message: "Trip is already completed" });
     }
-    
-    // Update trip status and start time
-    trip.status = 'active';
+
+    trip.status = "active";
     trip.startedAt = new Date();
     await trip.save();
-    
-    // Update user's current ride status
+
+    // Update user status
     const user = await User.findById(req.user._id);
     user.isOnTrip = true;
+    // Optionally link to a ride if Trip is associated with Ride
+    // user.currentRideId = someRideId;
     await user.save();
-    
-    // Emit trip started event via socket.io
-    const io = req.app.get('io');
-    io.to(`user:${req.user._id}`).emit('trip-started', {
+
+    const io = req.app.get("io");
+    io.to(`user:${req.user._id}`).emit("tripStarted", {
       tripId: trip._id,
-      startedAt: trip.startedAt
+      startedAt: trip.startedAt,
+      timestamp: new Date(),
     });
-    
-    res.json({
-      message: 'Trip started successfully',
-      trip
-    });
+
+    res.json({ message: "Trip started successfully", trip });
   } catch (error) {
+    console.error("Error in startTrip:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
@@ -215,56 +278,48 @@ export const startTrip = async (req, res) => {
 // Complete a trip
 export const completeTrip = async (req, res) => {
   try {
+    const { actualTime } = req.body; // Optional actualTime from request
     const trip = await Trip.findById(req.params.id);
-    
     if (!trip) {
-      return res.status(404).json({ message: 'Trip not found' });
+      return res.status(404).json({ message: "Trip not found" });
     }
-    
-    // Check if user has permission to complete this trip
+
+    // Check permission
     if (trip.userId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Not authorized to complete this trip' });
+      return res.status(403).json({ message: "Not authorized to complete this trip" });
     }
-    
-    // Check if trip is already completed or not started
-    if (trip.status === 'completed') {
-      return res.status(400).json({ message: 'Trip is already completed' });
+
+    if (trip.status === "completed") {
+      return res.status(400).json({ message: "Trip is already completed" });
     }
-    
-    if (trip.status === 'planned') {
-      return res.status(400).json({ message: 'Trip has not started yet' });
+
+    if (trip.status === "planned") {
+      return res.status(400).json({ message: "Trip has not started yet" });
     }
-    
-    // Calculate actual time if not provided
-    let actualTime = req.body.actualTime;
-    if (!actualTime && trip.startedAt) {
-      actualTime = Math.round((new Date() - trip.startedAt) / 60000); // in minutes
-    }
-    
-    // Update trip status and end time
-    trip.status = 'completed';
+
+    trip.status = "completed";
     trip.endedAt = new Date();
-    trip.actualTime = actualTime;
+    trip.actualTime = actualTime || Math.round((new Date() - trip.startedAt) / 60000); // In minutes
     await trip.save();
-    
-    // Update user's current ride status
+
+    // Update user status
     const user = await User.findById(req.user._id);
     user.isOnTrip = false;
+    // Optionally clear currentRideId if linked
+    // user.currentRideId = null;
     await user.save();
-    
-    // Emit trip completed event via socket.io
-    const io = req.app.get('io');
-    io.to(`user:${req.user._id}`).emit('trip-completed', {
+
+    const io = req.app.get("io");
+    io.to(`user:${req.user._id}`).emit("tripCompleted", {
       tripId: trip._id,
       endedAt: trip.endedAt,
-      actualTime: trip.actualTime
+      actualTime: trip.actualTime,
+      timestamp: new Date(),
     });
-    
-    res.json({
-      message: 'Trip completed successfully',
-      trip
-    });
+
+    res.json({ message: "Trip completed successfully", trip });
   } catch (error) {
+    console.error("Error in completeTrip:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
@@ -273,47 +328,43 @@ export const completeTrip = async (req, res) => {
 export const cancelTrip = async (req, res) => {
   try {
     const trip = await Trip.findById(req.params.id);
-    
     if (!trip) {
-      return res.status(404).json({ message: 'Trip not found' });
+      return res.status(404).json({ message: "Trip not found" });
     }
-    
-    // Check if user has permission to cancel this trip
+
+    // Check permission
     if (trip.userId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Not authorized to cancel this trip' });
+      return res.status(403).json({ message: "Not authorized to cancel this trip" });
     }
-    
-    // Check if trip is already completed or cancelled
-    if (trip.status === 'completed') {
-      return res.status(400).json({ message: 'Cannot cancel a completed trip' });
+
+    if (trip.status === "completed") {
+      return res.status(400).json({ message: "Cannot cancel a completed trip" });
     }
-    
-    if (trip.status === 'cancelled') {
-      return res.status(400).json({ message: 'Trip is already cancelled' });
+
+    if (trip.status === "cancelled") {
+      return res.status(400).json({ message: "Trip is already cancelled" });
     }
-    
-    // Update trip status
-    trip.status = 'cancelled';
+
+    trip.status = "cancelled";
     await trip.save();
-    
-    // If trip was active, update user's current ride status
-    if (trip.status === 'active') {
+
+    if (trip.status === "active") {
       const user = await User.findById(req.user._id);
       user.isOnTrip = false;
+      // Optionally clear currentRideId
+      // user.currentRideId = null;
       await user.save();
     }
-    
-    // Emit trip cancelled event via socket.io
-    const io = req.app.get('io');
-    io.to(`user:${req.user._id}`).emit('trip-cancelled', {
-      tripId: trip._id
+
+    const io = req.app.get("io");
+    io.to(`user:${trip.userId}`).emit("tripCancelled", {
+      tripId: trip._id,
+      timestamp: new Date(),
     });
-    
-    res.json({
-      message: 'Trip cancelled successfully',
-      trip
-    });
+
+    res.json({ message: "Trip cancelled successfully", trip });
   } catch (error) {
+    console.error("Error in cancelTrip:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
@@ -321,90 +372,71 @@ export const cancelTrip = async (req, res) => {
 // Add an alert to a trip
 export const addAlert = async (req, res) => {
   try {
-    const { message, type, severity = 'info' } = req.body;
-    
-    if (!message || !type) {
-      return res.status(400).json({ message: 'Message and type are required' });
-    }
-    
+    const parsedBody = alertSchema.parse(req.body); // Validate input
+    const { message, type, severity = "info" } = parsedBody;
+
     const trip = await Trip.findById(req.params.id);
-    
     if (!trip) {
-      return res.status(404).json({ message: 'Trip not found' });
+      return res.status(404).json({ message: "Trip not found" });
     }
-    
-    // Check if user has permission to add alerts to this trip
-    if (trip.userId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Not authorized to add alerts to this trip' });
+
+    // Check permission (removed role check)
+    if (trip.userId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "Not authorized to add alerts to this trip" });
     }
-    
-    // Add alert
-    trip.alerts.push({
-      message,
-      type,
-      severity,
-      timestamp: new Date()
-    });
-    
+
+    const alert = { message, type, severity, timestamp: new Date() };
+    trip.alerts.push(alert);
     await trip.save();
-    
-    // Emit alert event via socket.io
-    const io = req.app.get('io');
-    io.to(`user:${trip.userId}`).emit('trip-alert', {
+
+    const io = req.app.get("io");
+    io.to(`user:${trip.userId}`).emit("tripAlert", {
       tripId: trip._id,
-      alert: {
-        message,
-        type,
-        severity,
-        timestamp: new Date()
-      }
+      alert,
+      timestamp: new Date(),
     });
-    
-    res.json({
-      message: 'Alert added successfully',
-      trip
-    });
+
+    res.json({ message: "Alert added successfully", trip });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ message: error.errors.map(e => e.message).join(", ") });
+    }
+    console.error("Error in addAlert:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
 
-// Update trip route data (for real-time updates during trip)
+// Update trip route data
 export const updateRouteData = async (req, res) => {
   try {
-    const { route } = req.body;
-    
-    if (!route || !Array.isArray(route)) {
-      return res.status(400).json({ message: 'Valid route array is required' });
-    }
-    
+    const { route } = z.object({ route: z.array(routeSchema) }).parse(req.body); // Validate input
+
     const trip = await Trip.findById(req.params.id);
-    
     if (!trip) {
-      return res.status(404).json({ message: 'Trip not found' });
+      return res.status(404).json({ message: "Trip not found" });
     }
-    
-    // Check if user has permission to update this trip
-    if (trip.userId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Not authorized to update this trip' });
+
+    // Check permission (removed role check)
+    if (trip.userId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "Not authorized to update this trip" });
     }
-    
-    // Update route data
+
     trip.route = route;
     await trip.save();
-    
-    // Emit route update event via socket.io
-    const io = req.app.get('io');
-    io.to(`user:${trip.userId}`).emit('route-updated', {
+
+    const io = req.app.get("io");
+    io.to(`user:${trip.userId}`).emit("routeUpdated", {
       tripId: trip._id,
-      route
+      route,
+      timestamp: new Date(),
     });
-    
-    res.json({
-      message: 'Route data updated successfully',
-      trip
-    });
+
+    res.json({ message: "Route data updated successfully", trip });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ message: error.errors.map(e => e.message).join(", ") });
+    }
+    console.error("Error in updateRouteData:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
