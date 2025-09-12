@@ -1,12 +1,11 @@
+// middleware/upload.js
 import multer from 'multer';
-import pkg from 'cloudinary';
 import { cloudinary } from '../config/cloudinary.js';
 
-// Create a memory storage for multer
+// Multer memory storage
 const storage = multer.memoryStorage();
-const { DataBuffer } = pkg;
 
-// File filter to accept only images
+// File filter
 const fileFilter = (req, file, cb) => {
   if (file.mimetype.startsWith('image/')) {
     cb(null, true);
@@ -15,40 +14,33 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-// Initialize multer with storage and file filter
-const upload = multer({
+// Multer instance
+export const upload = multer({
   storage,
-  limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB max file size
-  },
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
   fileFilter,
 });
 
-// Function to upload image to Cloudinary
-export const uploadToCloudinary = async (buffer) => {
+// Upload function
+export const uploadToCloudinary = (buffer) => {
   return new Promise((resolve, reject) => {
     const uploadStream = cloudinary.uploader.upload_stream(
       {
         folder: 'saferoute/profile_pictures',
         transformation: [
           { width: 500, height: 500, crop: 'limit' },
-          { quality: 'auto' }
-        ]
+          { quality: 'auto' },
+        ],
       },
       (error, result) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve(result);
-        }
+        if (error) reject(error);
+        else resolve(result);
       }
     );
-    
+
     uploadStream.end(buffer);
   });
 };
 
-// Middleware to handle single image upload
+// Middleware for single upload
 export const uploadSingleImage = upload.single('profilePicture');
-
-export default upload;

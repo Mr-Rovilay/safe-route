@@ -1,8 +1,8 @@
-import Alert from "../models/Alert.js";
-import Ride from "../models/Ride.js";
-import Trip from "../models/Trip.js";
-import Weather from "../models/Weather.js";
-import Flood from "../models/Flood.js";
+import Alert from "../models/AlertSchema.js";
+import Ride from "../models/RideSchema.js";
+import Trip from "../models/TripSchema.js";
+import Weather from "../models/WeatherSchema.js";
+import Flood from "../models/FloodSchema.js";
 import { z } from "zod";
 
 // Input validation schemas

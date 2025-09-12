@@ -1,5 +1,5 @@
-import Weather from "../models/Weather.js"; // Corrected import
-import Flood from "../models/Flood.js"; // Added for integration
+import Weather from "../models/WeatherSchema.js"; 
+import Flood from "../models/FloodSchema.js"; 
 import axios from "axios";
 import { z } from "zod";
 
