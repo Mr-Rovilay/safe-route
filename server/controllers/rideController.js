@@ -74,7 +74,7 @@ export const createRide = async (req, res) => {
       return res.status(400).json({ message: error.errors.map(e => e.message).join(", ") });
     }
     console.error("Error in createRide:", error.message);
-    res.status(500).json({ message: error.message });
+    res.status(50).json({ message: error.message });
   }
 };
 

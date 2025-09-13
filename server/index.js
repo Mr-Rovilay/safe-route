@@ -62,26 +62,6 @@ app.use('/api/weather', weatherRoutes);
 app.use('/api/floods', floodRoutes);
 app.use('/api/searches', searchRoutes);
 
-// Add this route to index.js before starting the server
-// app.get('/create-indexes', async (req, res) => {
-//   try {
-//     // Create indexes for Traffic model
-//     await Traffic.collection.createIndex({ location: "2dsphere" });
-    
-//     // Create indexes for Flood model
-//     await Flood.collection.createIndex({ coordinates: "2dsphere" });
-//     await Flood.collection.createIndex({ lga: 1, recordedAt: -1 });
-    
-//     // Create indexes for Search model
-//     await Search.collection.createIndex({ query: "text" });
-//     await Search.collection.createIndex({ location: "2dsphere" });
-    
-//     res.json({ message: "Indexes created successfully" });
-//   } catch (error) {
-//     res.status(500).json({ message: error.message });
-//   }
-// });
-
 // Error handling middleware
 app.use((err, req, res, next) => {
   // Handle multer errors
@@ -105,7 +85,6 @@ app.get("/", (req, res) => {
 
 // Initialize socket events
 initSockets(io);
-
 // Schedule weather check every 30 minutes for key Lagos locations
 cron.schedule('*/30 * * * *', async () => {
   try {
@@ -113,9 +92,9 @@ cron.schedule('*/30 * * * *', async () => {
       console.log('OpenWeather API key not configured, skipping weather check');
       return;
     }
-    
+
     console.log('Starting scheduled weather data update...');
-    
+
     // Key locations in Lagos to monitor
     const lagosLocations = [
       { name: 'Lagos Island', lat: 6.4541, lng: 3.3947 },
@@ -126,36 +105,37 @@ cron.schedule('*/30 * * * *', async () => {
       { name: 'Apapa', lat: 6.4476, lng: 3.3692 },
       { name: 'Mainland', lat: 6.5244, lng: 3.3792 }
     ];
-    
+
     let updateCount = 0;
     let highRiskAreas = [];
-    
+
     // Fetch weather data for each location
     for (const location of lagosLocations) {
       try {
+        // Fetch current weather
         const response = await axios.get(
           `https://api.openweathermap.org/data/2.5/weather?lat=${location.lat}&lon=${location.lng}&appid=${process.env.OPENWEATHER_API_KEY}&units=metric`
         );
-        
+
         // Fetch forecast data
         const forecastResponse = await axios.get(
           `https://api.openweathermap.org/data/2.5/forecast?lat=${location.lat}&lon=${location.lng}&appid=${process.env.OPENWEATHER_API_KEY}&units=metric`
         );
-        
+
         const currentData = response.data;
         const forecastData = forecastResponse.data;
-        
-        // Calculate precipitation probability and flood risk
+
+        // Calculate precipitation probability and flood risk (using your existing helpers)
         const precipitationProbability = calculatePrecipitationProbability(forecastData);
         const floodRisk = calculateFloodRisk(currentData, forecastData);
-        
-        // Create weather data object
+
+        // Create weather data object with correct GeoJSON format
         const weatherData = {
           city: location.name,
           lga: getLGAFromLocation(location.name),
           coordinates: {
-            lat: currentData.coord.lat,
-            lng: currentData.coord.lon
+            type: "Point",  // Added explicit type for GeoJSON
+            coordinates: [currentData.coord.lon, currentData.coord.lat]  // [lng, lat] - Fixed order and format
           },
           temperature: currentData.main.temp,
           feelsLike: currentData.main.feels_like,
@@ -167,24 +147,24 @@ cron.schedule('*/30 * * * *', async () => {
           windSpeed: currentData.wind?.speed || 0,
           windDirection: currentData.wind?.deg || 0,
           cloudCover: currentData.clouds?.all || 0,
-          uvIndex: 0,
+          uvIndex: 0,  // Not available in current API; fetch from separate endpoint if needed
           rainfall: currentData.rain ? currentData.rain['1h'] || 0 : 0,
           precipitationProbability,
           floodRisk,
-          sunrise: new Date(currentData.sys.sunrise * 1000),
-          sunset: new Date(currentData.sys.sunset * 1000),
-          condition: currentData.weather[0].main,
+          sunrise: new Date(currentData.sys.sunrise * 1000),  // Convert Unix timestamp to Date
+          sunset: new Date(currentData.sys.sunset * 1000),    // Convert Unix timestamp to Date
+          condition: currentData.weather[0].main.toLowerCase(),  // Convert to lowercase to match enum
           description: currentData.weather[0].description,
           source: 'OpenWeather',
           recordedAt: new Date()
         };
-        
+
         // Save to database using imported Weather model
         const weather = new Weather(weatherData);
         await weather.save();
-        
+
         updateCount++;
-        
+
         // Check for high flood risk
         if (floodRisk === 'high') {
           highRiskAreas.push({
@@ -194,17 +174,18 @@ cron.schedule('*/30 * * * *', async () => {
             precipitationProbability
           });
         }
-        
+
         // Emit weather update via socket.io
         io.emit('weather-update', weatherData);
-        
+
       } catch (error) {
         console.error(`Error fetching weather data for ${location.name}:`, error.message);
+        // Continue with other locations instead of stopping the loop
       }
     }
-    
+
     console.log(`Weather data updated for ${updateCount} locations`);
-    
+
     // If there are high flood risk areas, emit an alert
     if (highRiskAreas.length > 0) {
       io.emit('flood-risk-alert', {
@@ -214,9 +195,8 @@ cron.schedule('*/30 * * * *', async () => {
       });
       console.log('Flood risk alert emitted for:', highRiskAreas.map(a => a.location).join(', '));
     }
-    
   } catch (error) {
-    console.error('Error in scheduled weather update:', error);
+    console.error('Error in scheduled weather update:', error.message);
   }
 });
 

@@ -25,7 +25,10 @@ const weatherSchema = new mongoose.Schema({
   sunset: { type: Date },
   condition: {
     type: String,
-    enum: ["clear", "rain", "storm", "fog", "cloudy", "thunderstorm", "other"],
+    enum: [
+      "clear", "rain", "storm", "fog", "cloudy", "thunderstorm", "other",
+      "clouds", "drizzle", "snow", "mist", "haze" // Added common OpenWeather values
+    ],
     required: true,
   },
   description: { type: String },

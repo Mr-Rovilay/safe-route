@@ -1,6 +1,7 @@
 import Flood from "../models/FloodSchema.js"; // Corrected import
 import Traffic from "../models/TrafficSchema.js"; // Added for integration
 import { z } from "zod";
+import Weather from "../models/WeatherSchema.js";
 
 // Input validation schemas
 const querySchema = z.object({
@@ -331,6 +332,13 @@ export const simulateFloodData = async (req, res) => {
     if (req.headers["x-admin-token"] !== process.env.ADMIN_TOKEN) {
       return res.status(403).json({ message: "Admin access required" });
     }
+
+    // In floodController.js, simulateFloodData
+const recentWeather = await Weather.find({
+  rainfall: { $gt: 10 },
+  recordedAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+});
+// ... rest unchanged
 
     // Use Traffic.weather instead of Weather model
     const recentTraffic = await Traffic.find({
