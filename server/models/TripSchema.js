@@ -24,14 +24,6 @@ const tripSchema = new mongoose.Schema({
   route: [{
     segmentId: {
       type: String,
-      validate: {
-        validator: async function (v) {
-          if (!v) return true; // Allow null
-          const traffic = await mongoose.model("Traffic").findOne({ segmentId: v });
-          return !!traffic; // Ensure segmentId exists
-        },
-        message: "Invalid Traffic segmentId"
-      }
     },
     locationName: { type: String }, // e.g., "Third Mainland Bridge"
     congestionLevel: {

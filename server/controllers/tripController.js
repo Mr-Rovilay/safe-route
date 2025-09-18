@@ -5,9 +5,10 @@ import { z } from "zod"; // Added for validation
 
 // Input validation schemas
 const coordinatesSchema = z.object({
-  type: z.literal("Point").optional(),
+  type: z.literal("Point").default("Point"),
   coordinates: z.array(z.number()).length(2),
 });
+
 
 const routeSchema = z.object({
   segmentId: z.string().optional(),
@@ -31,6 +32,7 @@ const createTripSchema = z.object({
   route: z.array(routeSchema).optional(),
   estimatedTime: z.number().min(0).optional(),
 });
+
 
 const updateTripSchema = z.object({
   origin: z.object({
@@ -59,19 +61,14 @@ export const createTrip = async (req, res) => {
     const parsedBody = createTripSchema.parse(req.body); // Validate input
     const { origin, destination, route = [], estimatedTime } = parsedBody;
 
-    const trip = new Trip({
-      userId: req.user._id,
-      origin: {
-        address: origin.address,
-        coordinates: { type: "Point", coordinates: origin.coordinates },
-      },
-      destination: {
-        address: destination.address,
-        coordinates: { type: "Point", coordinates: destination.coordinates },
-      },
-      route,
-      estimatedTime,
-    });
+const trip = new Trip({
+  userId: req.user._id,
+  origin,
+  destination,
+  route,
+  estimatedTime,
+});
+
 
     await trip.save();
 
